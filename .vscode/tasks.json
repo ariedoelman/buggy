@@ -1,0 +1,43 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build firmware (rp2040)",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["build", "--target", "thumbv6m-none-eabi", "--features", "debug-break"],
+      "problemMatcher": ["$rustc"],
+      "group": { "kind": "build", "isDefault": true },
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "Build firmware (rp2040, no break)",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["build", "--target", "thumbv6m-none-eabi"],
+      "problemMatcher": ["$rustc"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "Flash firmware (probe)",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/flash-with-probe.sh",
+      "dependsOn": "Build firmware (rp2040)",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always"
+      },
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "shell": {
+          "executable": "/bin/zsh",
+          "args": ["-l", "-c"]
+        }
+      }
+    }
+  ]
+}
