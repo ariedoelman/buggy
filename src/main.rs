@@ -7,10 +7,7 @@
 use bsp::entry;
 use defmt::*;
 use defmt_rtt as _;
-use embedded_hal::digital::InputPin;
 use panic_probe as _;
-use smart_leds::{brightness, SmartLedsWrite, RGB8};
-use ws2812_pio::Ws2812;
 
 // Provide an alias for our BSP so we can switch targets quickly.
 // Uncomment the BSP you included in Cargo.toml, the rest of the code does not need to change.
@@ -20,19 +17,16 @@ use rp_pico as bsp;
 use bsp::hal::{
     clocks::{init_clocks_and_plls, Clock},
     pac,
-    pio::PIOExt,
     sio::Sio,
     timer::Timer,
     watchdog::Watchdog,
 };
 
+mod buggy_leds;
+
+use buggy_leds::{new_fixed, BuggyLedsFixed};
+
 const BRIGHTNESS: u8 = 51; // ~20%
-const BLACK: RGB8 = RGB8 { r: 0, g: 0, b: 0 };
-const RED: RGB8 = RGB8 { r: 255, g: 0, b: 0 };
-const YELLOW: RGB8 = RGB8 { r: 255, g: 150, b: 0 };
-const GREEN: RGB8 = RGB8 { r: 0, g: 255, b: 0 };
-const BLUE: RGB8 = RGB8 { r: 0, g: 0, b: 255 };
-const WHITE: RGB8 = RGB8 { r: 255, g: 255, b: 255 };
 
 #[cfg(feature = "debug-break")]
 #[inline(never)]
@@ -79,69 +73,20 @@ fn main() -> ! {
 
     let mut button = pins.gpio0.into_pull_down_input();
 
-    let led_pin = pins.gpio18.into_function::<bsp::hal::gpio::FunctionPio0>();
-    let (mut pio, sm0, _, _, _) = pac.PIO0.split(&mut pac.RESETS);
-    let mut ws2812 = Ws2812::new(
-        led_pin,
-        &mut pio,
-        sm0,
+    let mut buggy_leds: BuggyLedsFixed<'_> = new_fixed(
+        pins.gpio18,
+        pac.PIO0,
+        &mut pac.RESETS,
         clocks.peripheral_clock.freq(),
         timer.count_down(),
+        BRIGHTNESS,
     );
 
-    let mut leds = [BLACK; 4];
-    leds.fill(WHITE);
-    let _ = ws2812.write(brightness(leds.iter().copied(), BRIGHTNESS));
-
-    let mut led_state = 0u8;
-    let mut last_pressed = false;
-
     loop {
-        let pressed = button.is_high().unwrap_or(false);
-        if pressed && !last_pressed {
-            led_state = apply_button_state(led_state, &mut leds);
-            let _ = ws2812.write(brightness(leds.iter().copied(), BRIGHTNESS));
+        if buggy_leds.try_with_button(&mut button) {
             delay.delay_ms(20);
         }
-        last_pressed = pressed;
         delay.delay_ms(5);
-    }
-}
-
-fn apply_button_state(state: u8, leds: &mut [RGB8; 4]) -> u8 {
-    match state {
-        0 => {
-            leds[3] = BLUE;
-            leds[0] = GREEN;
-            leds[1] = YELLOW;
-            leds[2] = RED;
-            1
-        }
-        1 => {
-            leds[2] = BLUE;
-            leds[3] = GREEN;
-            leds[0] = YELLOW;
-            leds[1] = RED;
-            2
-        }
-        2 => {
-            leds[1] = BLUE;
-            leds[2] = GREEN;
-            leds[3] = YELLOW;
-            leds[0] = RED;
-            3
-        }
-        3 => {
-            leds[0] = BLUE;
-            leds[1] = GREEN;
-            leds[2] = YELLOW;
-            leds[3] = RED;
-            4
-        }
-        _ => {
-            leds.fill(BLACK);
-            0
-        }
     }
 }
 
