@@ -24,7 +24,7 @@
             "coreConfigs": [
                 {
                     "coreIndex": 0,
-                    "programBinary": "${workspaceFolder}/target/thumbv6m-none-eabi/debug/template",
+                    "programBinary": "${workspaceFolder}/target/thumbv6m-none-eabi/debug/buggy",
                     "rttEnabled": true,
                     "runToEntryPoint": "main",
                     "skipFiles": [
@@ -61,7 +61,7 @@
             "coreConfigs": [
                 {
                     "coreIndex": 0,
-                    "programBinary": "${workspaceFolder}/target/thumbv6m-none-eabi/debug/template",
+                    "programBinary": "${workspaceFolder}/target/thumbv6m-none-eabi/debug/buggy",
                     "rttEnabled": true,
                     "runToEntryPoint": "main",
                     "skipFiles": [
