@@ -26,7 +26,7 @@ mod buggy_leds;
 mod buggy_distance_sensor;
 
 use buggy_leds::{new_fixed, BuggyLedsFixed};
-use buggy_distance_sensor::{try_distance_with_leds, BuggyDistanceSensor};
+use buggy_distance_sensor::{try_front_distance_with_leds, BuggyDistanceSensor};
 
 const BRIGHTNESS: u8 = 51; // ~20%
 
@@ -76,14 +76,9 @@ fn main() -> ! {
     // let mut button = pins.gpio0.into_pull_down_input();
 
     let front_trigger = pins.gpio14.into_push_pull_output();
-    let front_echo = pins.gpio15.into_floating_input();
-    // Rear sensor isn't fitted on this buggy, but the pins are present.
-    let rear_trigger = pins.gpio3.into_push_pull_output();
-    let rear_echo = pins.gpio2.into_floating_input();
+    let front_echo = pins.gpio15.into_pull_down_input();
 
     let mut front_sensor = BuggyDistanceSensor::new(front_trigger, front_echo);
-    let mut rear_sensor = BuggyDistanceSensor::new(rear_trigger, rear_echo);
-
     let mut buggy_leds: BuggyLedsFixed<'_> = new_fixed(
         pins.gpio18,
         pac.PIO0,
@@ -101,8 +96,11 @@ fn main() -> ! {
     // }
 
     loop {
-        let _ = try_distance_with_leds(&mut front_sensor, &mut rear_sensor, &mut buggy_leds, &timer);
-        delay.delay_ms(5);
+        match try_front_distance_with_leds(&mut front_sensor, &mut buggy_leds, &timer) {
+            Ok(()) => {}
+            Err(err) => info!("distance error: {:?}", err),
+        }
+        delay.delay_ms(500);
     }
 }
 

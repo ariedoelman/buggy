@@ -8,7 +8,8 @@ use embedded_hal::digital::{InputPin, OutputPin};
 use bsp::hal::timer::Timer;
 use bsp::hal::gpio::{AnyPin, FunctionPio0};
 
-use crate::buggy_leds::{BuggyLed, BuggyLeds, LedError, BLUE, GREEN, RED, YELLOW};
+use crate::buggy_leds::{BuggyLed, BuggyLeds, LedError, BLACK, BLUE, GREEN, RED, YELLOW};
+use defmt::{info, Format};
 
 pub const FRONT_TRIGGER_PIN: u8 = 14;
 pub const FRONT_ECHO_PIN: u8 = 15;
@@ -20,13 +21,13 @@ const CM_PER_US_DEN: u32 = 10_000;
 const ROUND_TRIP_FACTOR: u32 = 2;
 const DEFAULT_MAX_DISTANCE_CM: u32 = 500;
 
-#[derive(Debug)]
+#[derive(Debug, Format)]
 pub enum DistanceError<TrigErr, EchoErr> {
     Trigger(TrigErr),
     Echo(EchoErr),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Format)]
 pub enum TryDistanceError<FrontTrigErr, FrontEchoErr, RearTrigErr, RearEchoErr> {
     Front(DistanceError<FrontTrigErr, FrontEchoErr>),
     Rear(DistanceError<RearTrigErr, RearEchoErr>),
@@ -59,6 +60,14 @@ where
     Echo: InputPin<Error = EchoErr>,
 {
     pub fn distance_cm(&mut self, timer: &Timer) -> Result<Option<u32>, DistanceError<TrigErr, EchoErr>> {
+        let idle_start = timer.get_counter().ticks();
+        while self.echo.is_high().map_err(DistanceError::Echo)? {
+            if elapsed_us(timer, idle_start) > self.max_echo_time_us {
+                info!("echo high before trigger, skipping measurement");
+                return Ok(None);
+            }
+        }
+
         self.trigger
             .set_low()
             .map_err(DistanceError::Trigger)?;
@@ -87,8 +96,41 @@ where
         let echo_end = timer.get_counter().ticks();
 
         let pulse_us = echo_end.saturating_sub(echo_start) as u32;
-        Ok(Some(pulse_us_to_cm(pulse_us)))
+        if pulse_us < 100 {
+            info!("pulse_us: {}, below minimum, skipping measurement", pulse_us);
+            return Ok(None);
+        }
+        let distance = pulse_us_to_cm(pulse_us);
+        info!("pulse_us: {}, distance_cm: {}", pulse_us, distance);
+        Ok(Some(distance))
     }
+}
+
+pub fn try_front_distance_with_leds<'a, I, FT, FE>(
+    front: &mut BuggyDistanceSensor<FT, FE>,
+    leds: &mut BuggyLeds<'a, I>,
+    timer: &Timer,
+) -> Result<(), TryDistanceError<FT::Error, FE::Error, (), ()>>
+where
+    I: AnyPin<Function = FunctionPio0>,
+    FT: OutputPin,
+    FE: InputPin,
+{
+    let front_distance = front
+        .distance_cm(timer)
+        .map_err(TryDistanceError::Front)?;
+
+    info!("front_distance_cm: {:?}", front_distance);
+
+    let front_color = front_color(front_distance);
+
+    leds.set_two(BuggyLed::FrontLeft, front_color, BuggyLed::FrontRight, front_color)
+        .map_err(TryDistanceError::Leds)?;
+    leds.set_two(BuggyLed::RearLeft, BLACK, BuggyLed::RearRight, BLACK)
+        .map_err(TryDistanceError::Leds)?;
+
+    delay_us(timer, 50);
+    Ok(())
 }
 
 pub fn try_distance_with_leds<'a, I, FT, FE, RT, RE>(
@@ -107,9 +149,11 @@ where
     let front_distance = front
         .distance_cm(timer)
         .map_err(TryDistanceError::Front)?;
+    info!("front_distance_cm: {:?}", front_distance);
     let rear_distance = rear
         .distance_cm(timer)
         .map_err(TryDistanceError::Rear)?;
+    info!("rear_distance_cm: {:?}", rear_distance);
 
     let front_color = front_color(front_distance);
     let rear_color = rear_color(rear_distance);

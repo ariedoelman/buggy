@@ -42,7 +42,7 @@ impl BuggyLed {
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, defmt::Format)]
 pub enum LedError {
     InvalidIndex,
     Driver,
