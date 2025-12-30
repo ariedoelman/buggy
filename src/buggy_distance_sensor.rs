@@ -9,7 +9,7 @@ use bsp::hal::timer::Timer;
 use bsp::hal::gpio::{AnyPin, FunctionPio0};
 
 use crate::buggy_leds::{BuggyLed, BuggyLeds, LedError, BLACK, BLUE, GREEN, RED, YELLOW};
-use defmt::{info, Format};
+use defmt::{Format, debug, info, warn};
 
 pub const FRONT_TRIGGER_PIN: u8 = 14;
 pub const FRONT_ECHO_PIN: u8 = 15;
@@ -63,7 +63,7 @@ where
         let idle_start = timer.get_counter().ticks();
         while self.echo.is_high().map_err(DistanceError::Echo)? {
             if elapsed_us(timer, idle_start) > self.max_echo_time_us {
-                info!("echo high before trigger, skipping measurement");
+                warn!("echo high before trigger, skipping measurement");
                 return Ok(None);
             }
         }
@@ -97,11 +97,11 @@ where
 
         let pulse_us = echo_end.saturating_sub(echo_start) as u32;
         if pulse_us < 100 {
-            info!("pulse_us: {}, below minimum, skipping measurement", pulse_us);
+            warn!("pulse_us: {}, below minimum, skipping measurement", pulse_us);
             return Ok(None);
         }
         let distance = pulse_us_to_cm(pulse_us);
-        info!("pulse_us: {}, distance_cm: {}", pulse_us, distance);
+        debug!("pulse_us: {}, distance_cm: {}", pulse_us, distance);
         Ok(Some(distance))
     }
 }
@@ -120,7 +120,7 @@ where
         .distance_cm(timer)
         .map_err(TryDistanceError::Front)?;
 
-    info!("front_distance_cm: {:?}", front_distance);
+    debug!("front_distance_cm: {:?}", front_distance);
 
     let front_color = front_color(front_distance);
 

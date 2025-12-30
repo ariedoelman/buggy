@@ -98,9 +98,9 @@ fn main() -> ! {
     loop {
         match try_front_distance_with_leds(&mut front_sensor, &mut buggy_leds, &timer) {
             Ok(()) => {}
-            Err(err) => info!("distance error: {:?}", err),
+            Err(err) => warn!("distance error: {:?}", err),
         }
-        delay.delay_ms(500);
+        delay.delay_ms(50);
     }
 }
 
