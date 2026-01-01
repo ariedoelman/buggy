@@ -64,7 +64,7 @@ fn main() -> ! {
     .unwrap();
  
     let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
-    let timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
+    let mut timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
 
     let pins = bsp::Pins::new(
         pac.IO_BANK0,
@@ -82,6 +82,9 @@ fn main() -> ! {
         &mut pac.RESETS,
         clocks.system_clock.freq(),
     );
+    front_sensor
+        .start_periodic_measurements(timer.alarm_0().unwrap(), 500_000)
+        .unwrap();
     let mut buggy_leds: BuggyLedsFixed<'_> = new_fixed(
         pins.gpio18,
         pac.PIO0,
@@ -99,11 +102,11 @@ fn main() -> ! {
     // }
 
     loop {
-        match try_front_distance_with_leds(&mut front_sensor, &mut buggy_leds, &timer) {
+        match try_front_distance_with_leds(&mut front_sensor, &mut buggy_leds) {
             Ok(()) => {}
             Err(err) => warn!("distance error: {:?}", err),
         }
-        delay.delay_ms(50);
+        delay.delay_ms(1000);
     }
 }
 

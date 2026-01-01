@@ -10,14 +10,14 @@ use core::{
 
 use cortex_m::interrupt::{self as cortex_interrupt, Mutex};
 use bsp::hal::{
-    fugit::HertzU32,
+    fugit::{ExtU32, HertzU32},
     gpio::{
         AnyPin, DynPinId, DynPullType, Function, FunctionPio0, FunctionPio1, Pin, PinId,
         PullDown, PullType, ValidFunction,
     },
     pac::{self, interrupt},
     pio::{PinDir, PinState, PIOBuilder, PIOExt, PioIRQ, Running, Rx, SM0, StateMachine, Tx},
-    timer::Timer,
+    timer::{Alarm0, Alarm},
 };
 
 use crate::buggy_leds::{BuggyLed, BuggyLeds, LedError, BLACK, BLUE, GREEN, RED, YELLOW};
@@ -33,10 +33,13 @@ const CM_PER_US_DEN: u32 = 10_000;
 const ROUND_TRIP_FACTOR: u32 = 2;
 const DEFAULT_MAX_DISTANCE_CM: u32 = 500;
 const PIO_TARGET_HZ: u32 = 2_000_000;
+const DEFAULT_PERIOD_US: u32 = 20_000;
+const NO_DISTANCE_CM: u32 = u32::MAX;
 
 #[derive(Debug, Format)]
 pub enum DistanceError {
     TriggerQueueFull,
+    AlreadyStarted,
 }
 
 #[derive(Debug, Format)]
@@ -55,7 +58,18 @@ type EchoPin = Pin<DynPinId, FunctionPio1, PullDown>;
 
 static PULSE_US: AtomicU32 = AtomicU32::new(0);
 static PULSE_READY: AtomicBool = AtomicBool::new(false);
+static LAST_DISTANCE_CM: AtomicU32 = AtomicU32::new(NO_DISTANCE_CM);
+static TRIGGER_QUEUE_FULL: AtomicBool = AtomicBool::new(false);
+static MEASUREMENT_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+static MEASUREMENT_START_US: AtomicU32 = AtomicU32::new(0);
+static MAX_DISTANCE_CM: AtomicU32 = AtomicU32::new(DEFAULT_MAX_DISTANCE_CM);
+static MAX_ECHO_TIME_US: AtomicU32 = AtomicU32::new(0);
+static MEASUREMENT_PERIOD_US: AtomicU32 = AtomicU32::new(DEFAULT_PERIOD_US);
 static DISTANCE_RX: Mutex<RefCell<Option<DistanceRx>>> = Mutex::new(RefCell::new(None));
+static DISTANCE_TX: Mutex<RefCell<Option<DistanceTx>>> = Mutex::new(RefCell::new(None));
+static DISTANCE_SM: Mutex<RefCell<Option<DistanceStateMachine>>> = Mutex::new(RefCell::new(None));
+static TIMER_ALARM: Mutex<RefCell<Option<Alarm0>>> = Mutex::new(RefCell::new(None));
+static PULSE_CALLBACK: Mutex<RefCell<Option<fn(Option<u32>)>>> = Mutex::new(RefCell::new(None));
 
 #[interrupt]
 fn PIO1_IRQ_0() {
@@ -66,6 +80,8 @@ fn PIO1_IRQ_0() {
                 let pulse_us = !x_end;
                 PULSE_US.store(pulse_us, Ordering::Relaxed);
                 PULSE_READY.store(true, Ordering::Release);
+                MEASUREMENT_IN_FLIGHT.store(false, Ordering::Release);
+                update_last_distance(pulse_us);
             }
         }
     });
@@ -74,11 +90,10 @@ fn PIO1_IRQ_0() {
 pub struct BuggyDistanceSensor {
     _trigger: TriggerPin,
     _echo: EchoPin,
-    sm: DistanceStateMachine,
-    tx: DistanceTx,
+    sm: Option<DistanceStateMachine>,
+    tx: Option<DistanceTx>,
     max_distance_cm: u32,
     max_echo_time_us: u32,
-    measurement_in_flight: bool,
 }
 
 impl BuggyDistanceSensor {
@@ -153,90 +168,88 @@ impl BuggyDistanceSensor {
             pac::NVIC::unmask(pac::Interrupt::PIO1_IRQ_0);
         }
 
+        MAX_ECHO_TIME_US.store(max_echo_time_us(DEFAULT_MAX_DISTANCE_CM), Ordering::Relaxed);
+        MAX_DISTANCE_CM.store(DEFAULT_MAX_DISTANCE_CM, Ordering::Relaxed);
+
         Self {
             _trigger: trigger,
             _echo: echo,
-            sm,
-            tx,
+            sm: Some(sm),
+            tx: Some(tx),
             max_distance_cm: DEFAULT_MAX_DISTANCE_CM,
             max_echo_time_us: max_echo_time_us(DEFAULT_MAX_DISTANCE_CM),
-            measurement_in_flight: false,
         }
     }
 
     pub fn set_max_distance_cm(&mut self, max_distance_cm: u32) {
         self.max_distance_cm = max_distance_cm;
         self.max_echo_time_us = max_echo_time_us(max_distance_cm);
+        MAX_DISTANCE_CM.store(max_distance_cm, Ordering::Relaxed);
+        MAX_ECHO_TIME_US.store(self.max_echo_time_us, Ordering::Relaxed);
     }
 
-    pub fn distance_cm(&mut self, timer: &Timer) -> Result<Option<u32>, DistanceError> {
-        if let Some(distance) = self.take_ready_measurement() {
-            return Ok(distance);
+    pub fn start_periodic_measurements(
+        &mut self,
+        alarm: Alarm0,
+        period_us: u32,
+    ) -> Result<(), DistanceError> {
+        if self.tx.is_none() || self.sm.is_none() {
+            return Err(DistanceError::AlreadyStarted);
         }
 
-        if !self.measurement_in_flight {
-            self.start_measurement()?;
-        }
+        MEASUREMENT_PERIOD_US.store(period_us, Ordering::Relaxed);
+        MAX_DISTANCE_CM.store(self.max_distance_cm, Ordering::Relaxed);
+        MAX_ECHO_TIME_US.store(self.max_echo_time_us, Ordering::Relaxed);
+        LAST_DISTANCE_CM.store(NO_DISTANCE_CM, Ordering::Relaxed);
+        MEASUREMENT_IN_FLIGHT.store(false, Ordering::Relaxed);
 
-        let wait_start = timer.get_counter().ticks();
-        loop {
-            if let Some(distance) = self.take_ready_measurement() {
-                return Ok(distance);
+        cortex_interrupt::free(|cs| {
+            *DISTANCE_TX.borrow(cs).borrow_mut() = self.tx.take();
+            *DISTANCE_SM.borrow(cs).borrow_mut() = self.sm.take();
+            *TIMER_ALARM.borrow(cs).borrow_mut() = Some(alarm);
+        });
+
+        cortex_interrupt::free(|cs| {
+            if let Some(alarm) = TIMER_ALARM.borrow(cs).borrow_mut().as_mut() {
+                alarm.clear_interrupt();
+                let _ = alarm.schedule(period_us.micros());
+                alarm.enable_interrupt();
             }
+        });
 
-            if elapsed_us(timer, wait_start) > self.max_echo_time_us {
-                self.measurement_in_flight = false;
-                self.sm.restart();
-                self.sm.clear_fifos();
-                warn!("echo timeout, skipping measurement");
-                return Ok(None);
-            }
-
-            cortex_m::asm::wfi();
+        unsafe {
+            pac::NVIC::unpend(pac::Interrupt::TIMER_IRQ_0);
+            pac::NVIC::unmask(pac::Interrupt::TIMER_IRQ_0);
         }
-    }
 
-    fn start_measurement(&mut self) -> Result<(), DistanceError> {
-        PULSE_READY.store(false, Ordering::Release);
-        if !self.tx.write(0) {
-            return Err(DistanceError::TriggerQueueFull);
-        }
-        self.measurement_in_flight = true;
         Ok(())
     }
 
-    fn take_ready_measurement(&mut self) -> Option<Option<u32>> {
-        if !PULSE_READY.load(Ordering::Acquire) {
-            return None;
-        }
-        PULSE_READY.store(false, Ordering::Release);
-        self.measurement_in_flight = false;
+    pub fn set_distance_ready_callback(&mut self, callback: Option<fn(Option<u32>)>) {
+        cortex_interrupt::free(|cs| {
+            *PULSE_CALLBACK.borrow(cs).borrow_mut() = callback;
+        });
+    }
 
-        let pulse_us = PULSE_US.load(Ordering::Acquire);
-        if pulse_us == u32::MAX {
-            warn!("pulse_us: max value, treating as max distance");
+    pub fn distance_cm(&self) -> Result<Option<u32>, DistanceError> {
+        let queue_full = TRIGGER_QUEUE_FULL.load(Ordering::Acquire);
+        if queue_full {
+            TRIGGER_QUEUE_FULL.store(false, Ordering::Release);
+            return Err(DistanceError::TriggerQueueFull);
         }
-        if pulse_us < 100 {
-            warn!("pulse_us: {}, below minimum, skipping measurement", pulse_us);
-            return Some(None);
-        }
-
-        let distance = pulse_us_to_cm(pulse_us, self.max_distance_cm);
-        debug!("pulse_us: {}, distance_cm: {}", pulse_us, distance);
-        Some(Some(distance))
+        Ok(load_last_distance())
     }
 }
 
 pub fn try_front_distance_with_leds<'a, I>(
     front: &mut BuggyDistanceSensor,
     leds: &mut BuggyLeds<'a, I>,
-    timer: &Timer,
 ) -> Result<(), TryDistanceError>
 where
     I: AnyPin<Function = FunctionPio0>,
 {
     let front_distance = front
-        .distance_cm(timer)
+        .distance_cm()
         .map_err(TryDistanceError::Front)?;
 
     debug!("front_distance_cm: {:?}", front_distance);
@@ -255,17 +268,16 @@ pub fn try_distance_with_leds<'a, I>(
     front: &mut BuggyDistanceSensor,
     rear: &mut BuggyDistanceSensor,
     leds: &mut BuggyLeds<'a, I>,
-    timer: &Timer,
 ) -> Result<(), TryDistanceError>
 where
     I: AnyPin<Function = FunctionPio0>,
 {
     let front_distance = front
-        .distance_cm(timer)
+        .distance_cm()
         .map_err(TryDistanceError::Front)?;
     info!("front_distance_cm: {:?}", front_distance);
     let rear_distance = rear
-        .distance_cm(timer)
+        .distance_cm()
         .map_err(TryDistanceError::Rear)?;
     info!("rear_distance_cm: {:?}", rear_distance);
 
@@ -305,11 +317,83 @@ fn max_echo_time_us(max_distance_cm: u32) -> u32 {
     (numerator / denominator) as u32
 }
 
-fn elapsed_us(timer: &Timer, start_ticks: u64) -> u32 {
-    timer
-        .get_counter()
-        .ticks()
-        .saturating_sub(start_ticks) as u32
+fn update_last_distance(pulse_us: u32) {
+    let max_distance_cm = MAX_DISTANCE_CM.load(Ordering::Relaxed);
+    let distance = if pulse_us == u32::MAX {
+        warn!("pulse_us: max value, treating as max distance");
+        Some(max_distance_cm)
+    } else if pulse_us < 100 {
+        warn!("pulse_us: {}, below minimum, skipping measurement", pulse_us);
+        None
+    } else {
+        let distance_cm = pulse_us_to_cm(pulse_us, max_distance_cm);
+        debug!("pulse_us: {}, distance_cm: {}", pulse_us, distance_cm);
+        Some(distance_cm)
+    };
+
+    let stored = distance.unwrap_or(NO_DISTANCE_CM);
+    LAST_DISTANCE_CM.store(stored, Ordering::Release);
+
+    cortex_interrupt::free(|cs| {
+        if let Some(callback) = *PULSE_CALLBACK.borrow(cs).borrow() {
+            callback(distance);
+        }
+    });
+}
+
+fn load_last_distance() -> Option<u32> {
+    let stored = LAST_DISTANCE_CM.load(Ordering::Acquire);
+    if stored == NO_DISTANCE_CM {
+        None
+    } else {
+        Some(stored)
+    }
+}
+
+fn timer_counter_low() -> u32 {
+    // Safety: read-only access to the timer counter.
+    let timer = unsafe { &*pac::TIMER::ptr() };
+    timer.timerawl().read().bits()
+}
+
+#[interrupt]
+fn TIMER_IRQ_0() {
+    cortex_interrupt::free(|cs| {
+        if let Some(alarm) = TIMER_ALARM.borrow(cs).borrow_mut().as_mut() {
+            alarm.clear_interrupt();
+        }
+
+        let now = timer_counter_low();
+        if MEASUREMENT_IN_FLIGHT.load(Ordering::Acquire) {
+            let start = MEASUREMENT_START_US.load(Ordering::Relaxed);
+            let max_echo = MAX_ECHO_TIME_US.load(Ordering::Relaxed);
+            if now.wrapping_sub(start) > max_echo {
+                MEASUREMENT_IN_FLIGHT.store(false, Ordering::Release);
+                if let Some(sm) = DISTANCE_SM.borrow(cs).borrow_mut().as_mut() {
+                    sm.restart();
+                    sm.clear_fifos();
+                }
+                warn!("echo timeout, skipping measurement");
+            }
+        }
+
+        if !MEASUREMENT_IN_FLIGHT.load(Ordering::Acquire) {
+            if let Some(tx) = DISTANCE_TX.borrow(cs).borrow_mut().as_mut() {
+                PULSE_READY.store(false, Ordering::Release);
+                if tx.write(0) {
+                    MEASUREMENT_IN_FLIGHT.store(true, Ordering::Release);
+                    MEASUREMENT_START_US.store(now, Ordering::Relaxed);
+                } else {
+                    TRIGGER_QUEUE_FULL.store(true, Ordering::Release);
+                }
+            }
+        }
+
+        if let Some(alarm) = TIMER_ALARM.borrow(cs).borrow_mut().as_mut() {
+            let period_us = MEASUREMENT_PERIOD_US.load(Ordering::Relaxed);
+            let _ = alarm.schedule(period_us.micros());
+        }
+    });
 }
 
 fn front_color(distance_cm: Option<u32>) -> smart_leds::RGB8 {
