@@ -75,10 +75,13 @@ fn main() -> ! {
 
     // let mut button = pins.gpio0.into_pull_down_input();
 
-    let front_trigger = pins.gpio14.into_push_pull_output();
-    let front_echo = pins.gpio15.into_pull_down_input();
-
-    let mut front_sensor = BuggyDistanceSensor::new(front_trigger, front_echo);
+    let mut front_sensor = BuggyDistanceSensor::new(
+        pins.gpio14,
+        pins.gpio15,
+        pac.PIO1,
+        &mut pac.RESETS,
+        clocks.system_clock.freq(),
+    );
     let mut buggy_leds: BuggyLedsFixed<'_> = new_fixed(
         pins.gpio18,
         pac.PIO0,
