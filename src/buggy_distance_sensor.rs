@@ -8,7 +8,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
-use cortex_m::interrupt::{self as cortex_interrupt, Mutex};
+use cortex_m::interrupt::{self as cortex_interrupt, CriticalSection, Mutex};
 use bsp::hal::{
     fugit::{ExtU32, HertzU32},
     gpio::{
@@ -38,7 +38,6 @@ const NO_DISTANCE_CM: u32 = u32::MAX;
 
 #[derive(Debug, Format)]
 pub enum DistanceError {
-    TriggerQueueFull,
     AlreadyStarted,
 }
 
@@ -59,7 +58,6 @@ type EchoPin = Pin<DynPinId, FunctionPio1, PullDown>;
 static PULSE_US: AtomicU32 = AtomicU32::new(0);
 static PULSE_READY: AtomicBool = AtomicBool::new(false);
 static LAST_DISTANCE_CM: AtomicU32 = AtomicU32::new(NO_DISTANCE_CM);
-static TRIGGER_QUEUE_FULL: AtomicBool = AtomicBool::new(false);
 static MEASUREMENT_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 static MEASUREMENT_START_US: AtomicU32 = AtomicU32::new(0);
 static MAX_DISTANCE_CM: AtomicU32 = AtomicU32::new(DEFAULT_MAX_DISTANCE_CM);
@@ -69,7 +67,8 @@ static DISTANCE_RX: Mutex<RefCell<Option<DistanceRx>>> = Mutex::new(RefCell::new
 static DISTANCE_TX: Mutex<RefCell<Option<DistanceTx>>> = Mutex::new(RefCell::new(None));
 static DISTANCE_SM: Mutex<RefCell<Option<DistanceStateMachine>>> = Mutex::new(RefCell::new(None));
 static TIMER_ALARM: Mutex<RefCell<Option<Alarm0>>> = Mutex::new(RefCell::new(None));
-static PULSE_CALLBACK: Mutex<RefCell<Option<fn(Option<u32>)>>> = Mutex::new(RefCell::new(None));
+static PULSE_CALLBACK: Mutex<RefCell<Option<fn(&CriticalSection, Option<u32>)>>> =
+    Mutex::new(RefCell::new(None));
 
 #[interrupt]
 fn PIO1_IRQ_0() {
@@ -104,11 +103,6 @@ pub struct SharedDistance;
 
 impl DistanceReader for SharedDistance {
     fn distance_cm(&mut self) -> Result<Option<u32>, DistanceError> {
-        let queue_full = TRIGGER_QUEUE_FULL.load(Ordering::Acquire);
-        if queue_full {
-            TRIGGER_QUEUE_FULL.store(false, Ordering::Release);
-            return Err(DistanceError::TriggerQueueFull);
-        }
         Ok(load_last_distance())
     }
 }
@@ -242,18 +236,16 @@ impl BuggyDistanceSensor {
         Ok(())
     }
 
-    pub fn set_distance_ready_callback(&mut self, callback: Option<fn(Option<u32>)>) {
+    pub fn set_distance_ready_callback(
+        &mut self,
+        callback: Option<fn(&CriticalSection, Option<u32>)>,
+    ) {
         cortex_interrupt::free(|cs| {
             *PULSE_CALLBACK.borrow(cs).borrow_mut() = callback;
         });
     }
 
     pub fn distance_cm(&self) -> Result<Option<u32>, DistanceError> {
-        let queue_full = TRIGGER_QUEUE_FULL.load(Ordering::Acquire);
-        if queue_full {
-            TRIGGER_QUEUE_FULL.store(false, Ordering::Release);
-            return Err(DistanceError::TriggerQueueFull);
-        }
         Ok(load_last_distance())
     }
 }
@@ -361,7 +353,7 @@ fn update_last_distance(pulse_us: u32) {
 
     cortex_interrupt::free(|cs| {
         if let Some(callback) = *PULSE_CALLBACK.borrow(cs).borrow() {
-            callback(distance);
+            callback(cs, distance);
         }
     });
 }
@@ -408,8 +400,6 @@ fn TIMER_IRQ_0() {
                 if tx.write(0) {
                     MEASUREMENT_IN_FLIGHT.store(true, Ordering::Release);
                     MEASUREMENT_START_US.store(now, Ordering::Relaxed);
-                } else {
-                    TRIGGER_QUEUE_FULL.store(true, Ordering::Release);
                 }
             }
         }
