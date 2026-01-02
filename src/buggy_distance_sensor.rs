@@ -12,15 +12,15 @@ use cortex_m::interrupt::{self as cortex_interrupt, Mutex};
 use bsp::hal::{
     fugit::{ExtU32, HertzU32},
     gpio::{
-        AnyPin, DynPinId, DynPullType, Function, FunctionPio0, FunctionPio1, Pin, PinId,
-        PullDown, PullType, ValidFunction,
+        DynPinId, DynPullType, Function, FunctionPio1, Pin, PinId, PullDown, PullType,
+        ValidFunction,
     },
     pac::{self, interrupt},
     pio::{PinDir, PinState, PIOBuilder, PIOExt, PioIRQ, Running, Rx, SM0, StateMachine, Tx},
     timer::{Alarm0, Alarm},
 };
 
-use crate::buggy_leds::{BuggyLed, BuggyLeds, LedError, BLACK, BLUE, GREEN, RED, YELLOW};
+use crate::buggy_leds::{BuggyLed, BuggyLedWriter, LedError, BLACK, BLUE, GREEN, RED, YELLOW};
 use defmt::{debug, info, warn, Format};
 
 pub const FRONT_TRIGGER_PIN: u8 = 14;
@@ -94,6 +94,23 @@ pub struct BuggyDistanceSensor {
     tx: Option<DistanceTx>,
     max_distance_cm: u32,
     max_echo_time_us: u32,
+}
+
+pub trait DistanceReader {
+    fn distance_cm(&mut self) -> Result<Option<u32>, DistanceError>;
+}
+
+pub struct SharedDistance;
+
+impl DistanceReader for SharedDistance {
+    fn distance_cm(&mut self) -> Result<Option<u32>, DistanceError> {
+        let queue_full = TRIGGER_QUEUE_FULL.load(Ordering::Acquire);
+        if queue_full {
+            TRIGGER_QUEUE_FULL.store(false, Ordering::Release);
+            return Err(DistanceError::TriggerQueueFull);
+        }
+        Ok(load_last_distance())
+    }
 }
 
 impl BuggyDistanceSensor {
@@ -241,12 +258,19 @@ impl BuggyDistanceSensor {
     }
 }
 
-pub fn try_front_distance_with_leds<'a, I>(
-    front: &mut BuggyDistanceSensor,
-    leds: &mut BuggyLeds<'a, I>,
+impl DistanceReader for BuggyDistanceSensor {
+    fn distance_cm(&mut self) -> Result<Option<u32>, DistanceError> {
+        BuggyDistanceSensor::distance_cm(self)
+    }
+}
+
+pub fn try_front_distance_with_leds<L, D>(
+    front: &mut D,
+    leds: &mut L,
 ) -> Result<(), TryDistanceError>
 where
-    I: AnyPin<Function = FunctionPio0>,
+    L: BuggyLedWriter,
+    D: DistanceReader,
 {
     let front_distance = front
         .distance_cm()
@@ -264,13 +288,14 @@ where
     Ok(())
 }
 
-pub fn try_distance_with_leds<'a, I>(
-    front: &mut BuggyDistanceSensor,
-    rear: &mut BuggyDistanceSensor,
-    leds: &mut BuggyLeds<'a, I>,
+pub fn try_distance_with_leds<L, D>(
+    front: &mut D,
+    rear: &mut D,
+    leds: &mut L,
 ) -> Result<(), TryDistanceError>
 where
-    I: AnyPin<Function = FunctionPio0>,
+    L: BuggyLedWriter,
+    D: DistanceReader,
 {
     let front_distance = front
         .distance_cm()

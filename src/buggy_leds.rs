@@ -32,7 +32,7 @@ pub enum BuggyLed {
 }
 
 impl BuggyLed {
-    fn index(self) -> usize {
+    pub fn index(self) -> usize {
         match self {
             BuggyLed::FrontLeft => 0,
             BuggyLed::FrontRight => 1,
@@ -60,6 +60,16 @@ where
 }
 
 pub type BuggyLedsFixed<'a> = BuggyLeds<'a, Pin<DynPinId, FunctionPio0, DynPullType>>;
+
+pub trait BuggyLedWriter {
+    fn set_two(
+        &mut self,
+        first: BuggyLed,
+        first_color: RGB8,
+        second: BuggyLed,
+        second_color: RGB8,
+    ) -> Result<(), LedError>;
+}
 
 pub fn new_fixed<'a, I2, F, P>(
     led_pin: Pin<I2, F, P>,
@@ -178,5 +188,20 @@ where
                 0
             }
         }
+    }
+}
+
+impl<'a, I> BuggyLedWriter for BuggyLeds<'a, I>
+where
+    I: AnyPin<Function = FunctionPio0>,
+{
+    fn set_two(
+        &mut self,
+        first: BuggyLed,
+        first_color: RGB8,
+        second: BuggyLed,
+        second_color: RGB8,
+    ) -> Result<(), LedError> {
+        BuggyLeds::set_two(self, first, first_color, second, second_color)
     }
 }
